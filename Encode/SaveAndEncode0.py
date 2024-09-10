@@ -1,9 +1,7 @@
 import rospy
 import message_filters
-from sensor_msgs.msg import Image, PointCloud2, CompressedImage
-from std_msgs.msg import Int32
+from sensor_msgs.msg import Image, PointCloud2
 from nav_msgs.msg import Odometry
-from nmea_msgs.msg import Gpgga
 import numpy as np
 import cv2
 import os
@@ -16,56 +14,32 @@ import struct
 
 
 class DataCollector:
-    def __init__(self, image_topic, thermal_image_topic, pointcloud_topic, odometry_topic, floor_topic, save_dir, time_tolerance=0.1):
+    def __init__(self, image_topic, pointcloud_topic, odometry_topic, save_dir, time_tolerance=0.1):
         self.current_frame = 0
         self.save_dir = save_dir
         self.time_tolerance = time_tolerance
         self.odometry_position = None
         self.odometry_orientation = None
         self.pointcloud_frames = []
-        self.thermal_image_queue = deque()
-        self.image_queue = deque()
-        self.odometry_queue = deque()
-        self.init_lat_lon_h = None
-        self.pcd_timsetamp = None
-        self.floor = 1
 
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)
 
-        # Subscribe to both image topics
-        image_sub = message_filters.Subscriber(image_topic, CompressedImage)
-        thermal_image_sub = message_filters.Subscriber(thermal_image_topic, Image)
+        self.image_queue = deque()
+        self.odometry_queue = deque()
+
+        image_sub = message_filters.Subscriber(image_topic, Image)
         pointcloud_sub = message_filters.Subscriber(pointcloud_topic, PointCloud2)
         odometry_sub = rospy.Subscriber(odometry_topic, Odometry, self.odometry_callback)
-        # floor_sub = message_filters.Subscriber(floor_topic, Int32)
-        floor_sub = rospy.Subscriber(floor_topic, Int32, self.floor_callback)
-        gpgga_sub = rospy.Subscriber("/beidou_gpgga", Gpgga, self.gpgga_callback)
 
-        self.ts = message_filters.ApproximateTimeSynchronizer([image_sub, thermal_image_sub, pointcloud_sub], 10, time_tolerance)
+        self.ts = message_filters.ApproximateTimeSynchronizer([image_sub, pointcloud_sub], 10, time_tolerance)
         self.ts.registerCallback(self.queue_data)
 
     def odometry_callback(self, odometry_data):
         self.odometry_queue.append(odometry_data)
 
-    def floor_callback(self, msg):
-        self.floor = msg.data
-        rospy.loginfo(f"Received floor value: {self.floor}")
-
-    def gpgga_callback(self, msg):
-        latitude = msg.lat
-        longitude = msg.lon
-        altitude = msg.alt
-
-        if not self.init_lat_lon_h:
-            self.init_lat_lon_h = (latitude, longitude, altitude)
-            rospy.loginfo("Initial latitude: {:.6f}".format(latitude))
-            rospy.loginfo("Initial longitude: {:.6f}".format(longitude))
-            rospy.loginfo("Initial altitude: {:.2f} meters".format(altitude))
-
-    def queue_data(self, image_data, thermal_image_data, pointcloud_data):
+    def queue_data(self, image_data, pointcloud_data):
         self.image_queue.append(image_data)
-        self.thermal_image_queue.append(thermal_image_data)
         self.pointcloud_frames.append(pointcloud_data)
 
         if len(self.pointcloud_frames) == 10:
@@ -75,7 +49,9 @@ class DataCollector:
         if not self.odometry_queue:
             return None
 
+        # Make a copy of the deque to prevent mutation during iteration
         odometry_copy = list(self.odometry_queue)
+
         closest_odometry = min(odometry_copy, key=lambda odom: abs(odom.header.stamp - timestamp))
         return closest_odometry
 
@@ -86,13 +62,6 @@ class DataCollector:
         closest_image = min(self.image_queue, key=lambda img: abs(img.header.stamp - timestamp))
         return closest_image
 
-    def find_closest_thermal_image(self, timestamp):
-        if not self.thermal_image_queue:
-            return None
-
-        closest_thermal_image = min(self.thermal_image_queue, key=lambda img: abs(img.header.stamp - timestamp))
-        return closest_thermal_image
-
     def transform_point(self, point, transform_matrix):
         homogenous_point = np.array([point[0], point[1], point[2], 1.0])
         transformed_point = np.dot(transform_matrix, homogenous_point)
@@ -102,7 +71,6 @@ class DataCollector:
         final_pointcloud = []
         last_pointcloud = self.pointcloud_frames[-1]
         timestamp = last_pointcloud.header.stamp
-        self.pcd_timsetamp = timestamp
 
         for pcl in self.pointcloud_frames:
             closest_odometry = self.find_closest_odometry(pcl.header.stamp)
@@ -114,19 +82,16 @@ class DataCollector:
                         (transformed_point[0], transformed_point[1], transformed_point[2], intensity))
 
         closest_image = self.find_closest_image(timestamp)
-        closest_thermal_image = self.find_closest_thermal_image(timestamp)
         closest_odometry = self.find_closest_odometry(timestamp)
 
-        self.process_frame(closest_image, closest_thermal_image, final_pointcloud, closest_odometry)
+        self.process_frame(closest_image, final_pointcloud, closest_odometry)
 
         self.pointcloud_frames = []
         self.image_queue = deque(filter(lambda img: img.header.stamp >= timestamp, self.image_queue))
-        self.thermal_image_queue = deque(filter(lambda img: img.header.stamp >= timestamp, self.thermal_image_queue))
         self.odometry_queue = deque(filter(lambda odom: odom.header.stamp >= timestamp, self.odometry_queue))
 
-    def process_frame(self, image_data, thermal_image_data, fused_pointcloud, odometry_data):
+    def process_frame(self, image_data, fused_pointcloud, odometry_data):
         self.process_image(image_data)
-        self.process_thermal_image(thermal_image_data)
         self.process_pointcloud(fused_pointcloud)
         if odometry_data:
             self.process_odometry(odometry_data)
@@ -138,26 +103,14 @@ class DataCollector:
 
     def process_image(self, data):
         try:
-            # height = data.height
-            # width = data.width
-            # image_data = np.frombuffer(data.data, dtype=np.uint8).reshape((height, width, -1))
-            # resized_image = cv2.resize(image_data, (640, 480))
-            # _, jpg_data = cv2.imencode('.jpg', resized_image)
-            # self.image_data = jpg_data.tobytes()
-            self.image_data = data.data
-        except Exception as e:
-            rospy.logerr("Failed to process image: {}".format(e))
-
-    def process_thermal_image(self, data):
-        try:
             height = data.height
             width = data.width
             image_data = np.frombuffer(data.data, dtype=np.uint8).reshape((height, width, -1))
             resized_image = cv2.resize(image_data, (640, 480))
             _, jpg_data = cv2.imencode('.jpg', resized_image)
-            self.thermal_image_data = jpg_data.tobytes()
+            self.image_data = jpg_data.tobytes()
         except Exception as e:
-            rospy.logerr("Failed to process thermal image: {}".format(e))
+            rospy.logerr("Failed to process image: {}".format(e))
 
     def process_pointcloud(self, points):
         self.pointcloud_3d_data = self.convert_points_to_binary(points)
@@ -222,17 +175,7 @@ class DataCollector:
         return math.atan2(2.0 * (w * z), 1.0 - 2.0 * (z * z))
 
     def generate_json(self, points_3d, points_2d):
-        # timestamp = rospy.Time.now().to_sec()
-        timestamp = self.pcd_timsetamp.to_sec()
-        # floor = 0
-        # if timestamp > 1723467254.351712227:
-        #     floor = -1
-
-        if self.init_lat_lon_h:
-            init_lat_lon_h = [self.init_lat_lon_h[0], self.init_lat_lon_h[1], self.init_lat_lon_h[2]]
-        else:
-            init_lat_lon_h = [0.0, 0.0, 0.0]  # 设置默认值
-
+        timestamp = rospy.Time.now().to_sec()
         if self.odometry_position and self.odometry_orientation:
             yaw = self.quaternion_to_yaw(self.odometry_orientation)
             pos_yaw = self.odometry_position + [round(yaw, 6)]
@@ -242,13 +185,12 @@ class DataCollector:
         self.json_data = OrderedDict([
             ("device_id", 100002),
             ("device_time", timestamp),
-            ("init_lat_lon_h", init_lat_lon_h),
             ("pos_yaw", pos_yaw),
-            ("floor", self.floor),
+            ("floor", 7),
             ("is_exit", random.random() < 0.1),
             ("fire_point", self.get_fire_point()),
-            ("pcd_num_3d", len(points_3d)),
-            ("pcd_num_2d", len(points_2d))
+            ("3dpcd_num", len(points_3d)),
+            ("2dpcd_num", len(points_2d))
         ])
 
     def get_fire_point(self):
@@ -257,7 +199,7 @@ class DataCollector:
         return None
 
     def save_bin_file(self):
-        if self.image_data and self.thermal_image_data and self.pointcloud_3d_data and self.pointcloud_2d_data and self.json_data:
+        if self.image_data and self.pointcloud_3d_data and self.pointcloud_2d_data and self.json_data:
             bin_filename = os.path.join(self.save_dir, "frame_{}.bin".format(self.current_frame + 1))
             with open(bin_filename, 'wb') as bin_file:
                 # Encode JSON data
@@ -275,15 +217,10 @@ class DataCollector:
                 bin_file.write(struct.pack('I', len(self.image_data)))
                 bin_file.write(self.image_data)
 
-                # Encode JPEG thermal image data
-                bin_file.write(struct.pack('I', len(self.thermal_image_data)))
-                bin_file.write(self.thermal_image_data)
-
             rospy.loginfo("Saved BIN file: {}".format(bin_filename))
 
         # Reset data for the next frame
         self.image_data = None
-        self.thermal_image_data = None
         self.pointcloud_3d_data = None
         self.pointcloud_2d_data = None
         self.json_data = None
@@ -291,9 +228,7 @@ class DataCollector:
 
 if __name__ == '__main__':
     print("Data Encode ...")
-    image_topic = '/camera/color/image_raw/compressed'
-    thermal_image_topic = '/iray/thermal_img_show'
-    floor_topic = '/floor'
+    image_topic = '/iray/thermal_img'
     pointcloud_topic = '/cloud_registered_body'
     odometry_topic = '/Odometry'  # Odometry topic
     save_dir = './Data/BIN'
@@ -301,6 +236,6 @@ if __name__ == '__main__':
 
     rospy.init_node('data_collector', anonymous=True)
 
-    data_collector = DataCollector(image_topic, thermal_image_topic, pointcloud_topic, odometry_topic, floor_topic, save_dir, time_tolerance)
+    data_collector = DataCollector(image_topic, pointcloud_topic, odometry_topic, save_dir, time_tolerance)
 
     rospy.spin()
