@@ -22,10 +22,14 @@ source /home/han/Project/QT_display/yjzb_qt_yt/devel/setup.bash
 /home/han/Project/QT_display/yjzb_qt_yt/devel/lib/mapping/mapping
 " & sleep 1
 
-# ----------------------编码----------------------
-gnome-terminal -x bash -c "
-python3 Encode/SaveAndEncode.py
-" & sleep 1
+# # ----------------------编码----------------------
+# gnome-terminal -x bash -c "
+# python3 Encode/Encode_4G.py
+# " & sleep 1
+
+# gnome-terminal -x bash -c "
+# python3 Encode/SaveAndEncode.py
+# " & sleep 1
 
 
 # =====================传输====================
@@ -47,10 +51,10 @@ roslaunch pcd3map pcd3map.launch
 " & sleep 1
 
 # --------------------解码----------------------
-gnome-terminal -x bash -c "
-python3 Encode/Decode.py
-" & sleep 1
+# gnome-terminal -x bash -c "
+# python3 Encode/Decode.py
+# " & sleep 1
 
-gnome-terminal -x bash -c "
-python3 Encode/DataPublisher.py
-" & sleep 1
+# gnome-terminal -x bash -c "
+# python3 Encode/DataPublisher.py
+# " & sleep 1
